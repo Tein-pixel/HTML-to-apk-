@@ -1,91 +1,97 @@
-name: Build & Auto Release APK
-
+name: Build TEIN APK
 on:
-  push:
-    branches:
-      - main
-      - master
   workflow_dispatch:
+  push:
+    paths:
+      - 'TEIN.zip'
+      - 'TEIN_LOCAL_GRADLE_ENGINE_RECHECKED.zip'
+      - 'TEIN_LOCAL_GRADLE_ENGINE_NDK_FIXED.zip'
+      - 'TEIN_LOCAL_GRADLE_ENGINE_RESEARCHED.zip'
+      - '.github/workflows/build.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Check and extract TEIN.zip
+      - name: Prepare TEIN source
+        shell: bash
         run: |
-          if [ ! -f "TEIN.zip" ]; then
-            echo "::error::TEIN.zip tidak ditemukan di root repository. Upload TEIN.zip lalu jalankan workflow lagi."
-            exit 1
-          fi
-          rm -rf extracted
+          set -euo pipefail
           mkdir -p extracted
-          unzip -q TEIN.zip -d extracted
-          if [ ! -f "extracted/TEIN/settings.gradle" ]; then
-            echo "::error::Struktur ZIP tidak sesuai. File extracted/TEIN/settings.gradle tidak ditemukan."
-            find extracted -maxdepth 3 -type f | head -80
-            exit 1
+          if [[ -f extracted/TEIN/settings.gradle && -f extracted/TEIN/app/build.gradle ]]; then
+            echo "Using existing extracted/TEIN source."
+          else
+            SOURCE_ZIP=""
+            for candidate in TEIN.zip TEIN_LOCAL_GRADLE_ENGINE_NDK_FIXED.zip TEIN_LOCAL_GRADLE_ENGINE_RECHECKED.zip TEIN_LOCAL_GRADLE_ENGINE_RESEARCHED.zip; do
+              if [[ -f "$candidate" ]]; then SOURCE_ZIP="$candidate"; break; fi
+            done
+            if [[ -z "$SOURCE_ZIP" ]]; then
+              echo "::error::Upload TEIN.zip (or the named TEIN engine ZIP) to the repository root, or commit extracted/TEIN."
+              exit 1
+            fi
+            echo "Checking $SOURCE_ZIP"
+            unzip -t "$SOURCE_ZIP"
+            unzip -q -o "$SOURCE_ZIP" -d extracted
           fi
+          test -f extracted/TEIN/settings.gradle
+          test -f extracted/TEIN/app/build.gradle
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: 15859902
+      - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install and verify Android SDK / NDK
+        shell: bash
         run: |
-          sdkmanager --install \
-            "platform-tools" \
+          set -euo pipefail
+          # Force sdkmanager and Gradle to use one identical SDK root.
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          mkdir -p "$SDK_ROOT"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+          echo "Installing packages in SDK root: $SDK_ROOT"
+          sdkmanager --sdk_root="$SDK_ROOT" --install \
             "platforms;android-33" \
-            "build-tools;33.0.2"
+            "build-tools;34.0.0" \
+            "ndk;28.2.13676358"
+          NDK_CLANG="$SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          if [[ ! -x "$NDK_CLANG" ]]; then
+            echo "::error::NDK install step finished but clang was not found at $NDK_CLANG"
+            echo "Installed SDK packages:"
+            sdkmanager --sdk_root="$SDK_ROOT" --list_installed || true
+            echo "NDK folders under SDK root:"
+            ls -la "$SDK_ROOT/ndk" || true
+            exit 1
+          fi
+          echo "Verified NDK compiler: $NDK_CLANG"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Setup Gradle 8.5
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
 
-      - name: Build Debug APK
+      - name: Build APK
+        shell: bash
+        working-directory: extracted/TEIN
         run: |
-          cd extracted/TEIN
-          gradle :app:assembleDebug --no-daemon --stacktrace
+          set -euo pipefail
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          echo "Gradle SDK path: $(sed -n 's/^sdk.dir=//p' local.properties)"
+          gradle --no-daemon :app:assembleDebug --stacktrace
 
-      - name: Prepare APK for Release
-        run: |
-          mkdir -p release
-          cp extracted/TEIN/app/build/outputs/apk/debug/app-debug.apk release/TEIN.apk
-          test -s release/TEIN.apk
-
-      - name: Generate release version
-        id: version
-        run: |
-          VERSION="1.0.${GITHUB_RUN_NUMBER}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: TEIN ${{ steps.version.outputs.tag }}
-          body: |
-            ## TEIN APK
-
-            APK dibangun otomatis menggunakan GitHub Actions.
-
-            - Build: #${{ github.run_number }}
-            - Commit: `${{ github.sha }}`
-          files: release/TEIN.apk
-          generate_release_notes: true
+          name: TEIN-apk
+          path: extracted/TEIN/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
