@@ -4,8 +4,8 @@ on:
   push:
     paths:
       - 'TEIN.zip'
-      - 'TEIN_LOCAL_GRADLE_ENGINE_RECHECKED.zip'
       - 'TEIN_LOCAL_GRADLE_ENGINE_NDK_FIXED.zip'
+      - 'TEIN_LOCAL_GRADLE_ENGINE_RECHECKED.zip'
       - 'TEIN_LOCAL_GRADLE_ENGINE_RESEARCHED.zip'
       - '.github/workflows/build.yml'
 
@@ -31,7 +31,7 @@ jobs:
               if [[ -f "$candidate" ]]; then SOURCE_ZIP="$candidate"; break; fi
             done
             if [[ -z "$SOURCE_ZIP" ]]; then
-              echo "::error::Upload TEIN.zip (or the named TEIN engine ZIP) to the repository root, or commit extracted/TEIN."
+              echo "::error::Upload the TEIN source ZIP to the repository root, or commit extracted/TEIN."
               exit 1
             fi
             echo "Checking $SOURCE_ZIP"
@@ -46,28 +46,45 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Disable the action's own interactive license prompt; accept licenses
+      # non-interactively in the following step instead.
       - uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: false
+          log-accepted-android-sdk-licenses: false
+          packages: ''
 
-      - name: Install and verify Android SDK / NDK
+      - name: Accept SDK licenses and install SDK / NDK
         shell: bash
         run: |
           set -euo pipefail
-          # Force sdkmanager and Gradle to use one identical SDK root.
-          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           mkdir -p "$SDK_ROOT"
           export ANDROID_HOME="$SDK_ROOT"
           export ANDROID_SDK_ROOT="$SDK_ROOT"
-          echo "Installing packages in SDK root: $SDK_ROOT"
+          echo "Using SDK root: $SDK_ROOT"
+
+          # Accept licenses without an interactive TTY. Capture sdkmanager's
+          # status specifically, because `yes` may exit with SIGPIPE afterward.
+          set +e
+          yes | sdkmanager --sdk_root="$SDK_ROOT" --licenses > "$RUNNER_TEMP/sdk-licenses.log" 2>&1
+          LICENSE_STATUS=${PIPESTATUS[1]}
+          set -e
+          cat "$RUNNER_TEMP/sdk-licenses.log"
+          if [[ "$LICENSE_STATUS" -ne 0 ]]; then
+            echo "::error::sdkmanager --licenses failed with exit code $LICENSE_STATUS"
+            exit "$LICENSE_STATUS"
+          fi
+
           sdkmanager --sdk_root="$SDK_ROOT" --install \
             "platforms;android-33" \
             "build-tools;34.0.0" \
             "ndk;28.2.13676358"
+
           NDK_CLANG="$SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
           if [[ ! -x "$NDK_CLANG" ]]; then
-            echo "::error::NDK install step finished but clang was not found at $NDK_CLANG"
-            echo "Installed SDK packages:"
+            echo "::error::NDK install completed but clang was not found: $NDK_CLANG"
             sdkmanager --sdk_root="$SDK_ROOT" --list_installed || true
-            echo "NDK folders under SDK root:"
             ls -la "$SDK_ROOT/ndk" || true
             exit 1
           fi
